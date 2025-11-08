@@ -12,19 +12,14 @@ logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    help = 'Scrape tweets from Twitter/X for Indian stock market discussions'
+    help = 'Scrape tweets from Twitter/X API for Indian stock market discussions'
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            '--headless',
-            action='store_true',
-            help='Run browser in headless mode',
-        )
         parser.add_argument(
             '--workers',
             type=int,
             default=3,
-            help='Number of concurrent workers (default: 3)',
+            help='Number of concurrent API requests (default: 3)',
         )
 
     def handle(self, *args, **options):
@@ -36,7 +31,6 @@ class Command(BaseCommand):
         try:
             # Initialize components
             scraper = TwitterScraper(
-                headless=options['headless'],
                 max_workers=options['workers']
             )
             processor = DataProcessor(output_dir="data")

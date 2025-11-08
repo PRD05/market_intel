@@ -1,203 +1,268 @@
 """
-Twitter/X scraper using Selenium for collecting Indian stock market tweets.
-Handles rate limiting, anti-bot measures, and concurrent processing.
+Twitter/X API v2 scraper using OAuth 2.0 Bearer Token for collecting Indian stock market tweets.
+Uses official Twitter API with Academic Research access for comprehensive tweet search.
 """
 import time
 import hashlib
 import logging
 import re
+import os
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-import random
+import requests
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 
 class TwitterScraper:
-    """Selenium-based Twitter scraper for Indian stock market tweets"""
+    """Twitter API v2 scraper using OAuth 2.0 Bearer Token"""
     
     HASHTAGS = ['#nifty50', '#sensex', '#intraday', '#banknifty']
     MIN_TWEETS = 2000
-    TIME_WINDOW_HOURS = 24
-    
-    def __init__(self, headless: bool = True, max_workers: int = 3):
+    # Note: Standard API access allows 7 days (168 hours) max
+    # Academic Research access allows full archive
+    # Set to 168 for standard access, 240+ for Academic Research
+    TIME_WINDOW_HOURS = int(os.environ.get('TWITTER_TIME_WINDOW_HOURS', '168'))  # Default to 7 days for standard access
+
+    # Twitter API v2 configuration
+    BASE_URL = "https://api.twitter.com/2"
+    SEARCH_ENDPOINT = "/tweets/search/recent"  # Academic Research access required
+
+    def __init__(self, max_workers: int = 3):
         """
-        Initialize the scraper
+        Initialize the Twitter API scraper
         
         Args:
-            headless: Run browser in headless mode
-            max_workers: Number of concurrent browser instances
+            max_workers: Number of concurrent API requests (rate limited)
         """
-        self.headless = headless
         self.max_workers = max_workers
-        self.drivers = []
-        
-    def _create_driver(self) -> webdriver.Chrome:
-        """Create a configured Chrome driver with anti-detection measures"""
-        chrome_options = Options()
-        
-        if self.headless:
-            chrome_options.add_argument('--headless')
-        
-        # Anti-detection measures
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
-        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-        
-        # Memory optimization (keep JavaScript enabled for Twitter)
-        # chrome_options.add_argument('--disable-images')  # Commented out as it may break layout
-        
-        driver = webdriver.Chrome(options=chrome_options)
-        
-        # Execute script to hide webdriver property
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
-        return driver
-    
-    def _search_twitter(self, driver: webdriver.Chrome, hashtag: str) -> List[Dict]:
+        self.bearer_token = os.environ.get('TWITTER_BEARER_TOKEN')
+        self.session = requests.Session()
+
+        # Set up session headers
+        if self.bearer_token:
+            self.session.headers.update({
+                'Authorization': f'Bearer {self.bearer_token}',
+                'Content-Type': 'application/json'
+            })
+            logger.info("Twitter Bearer Token configured")
+            
+            # Warn about time window vs API access level
+            if self.TIME_WINDOW_HOURS > 168:
+                logger.warning(f"TIME_WINDOW_HOURS is {self.TIME_WINDOW_HOURS} hours ({self.TIME_WINDOW_HOURS/24:.1f} days)")
+                logger.warning("Standard API access only allows 7 days (168 hours) of tweet history")
+                logger.warning("For longer time windows, you need Academic Research access")
+                logger.warning("Apply at: https://developer.twitter.com/en/portal/petition/academic-research")
+                logger.warning("Or set TWITTER_TIME_WINDOW_HOURS=168 for standard access")
+        else:
+            logger.error("TWITTER_BEARER_TOKEN environment variable not set")
+            logger.error("Get your Bearer Token from: https://developer.twitter.com/en/portal/dashboard")
+            logger.error("You'll need Academic Research access for full tweet search")
+
+        # Rate limiting: Twitter API v2 allows 300 requests per 15 minutes for recent search
+        self.requests_per_window = 300
+        self.window_seconds = 900  # 15 minutes
+        self.request_times = []
+
+    def _rate_limit_check(self):
+        """Check and enforce rate limiting"""
+        now = time.time()
+
+        # Remove old requests outside the window
+        self.request_times = [t for t in self.request_times if now - t < self.window_seconds]
+
+        if len(self.request_times) >= self.requests_per_window:
+            # Calculate wait time
+            oldest_request = min(self.request_times)
+            wait_time = self.window_seconds - (now - oldest_request)
+            if wait_time > 0:
+                logger.info(f"Rate limit reached. Waiting {wait_time:.1f} seconds...")
+                time.sleep(wait_time)
+                self.request_times = []
+
+        self.request_times.append(now)
+
+    def _make_api_request(self, endpoint: str, params: Dict = None) -> Dict:
+        """Make a rate-limited API request to Twitter"""
+        if not self.bearer_token:
+            logger.error("=" * 60)
+            logger.error("❌ Twitter Bearer Token not configured!")
+            logger.error("   This scraper requires TWITTER_BEARER_TOKEN environment variable")
+            logger.error("   Options:")
+            logger.error("   1. Set TWITTER_BEARER_TOKEN environment variable")
+            logger.error("   2. Use Twikit scraper instead: pip install twikit")
+            logger.error("      Then use: curl -X POST ... -d '{\"use_twikit\": true}'")
+            logger.error("=" * 60)
+            raise ValueError("Twitter Bearer Token not configured")
+
+        self._rate_limit_check()
+
+        url = f"{self.BASE_URL}{endpoint}"
+        logger.debug(f"Making API request to: {url}")
+
+        try:
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+
+            # Log rate limit info
+            remaining = response.headers.get('x-rate-limit-remaining')
+            reset_time = response.headers.get('x-rate-limit-reset')
+            if remaining:
+                logger.debug(f"Rate limit remaining: {remaining}")
+
+            return response.json()
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API request failed: {e}")
+            if hasattr(e, 'response') and e.response:
+                status_code = e.response.status_code
+                logger.error(f"HTTP Status Code: {status_code}")
+                
+                # Try to get error details from response
+                try:
+                    error_data = e.response.json()
+                    logger.error(f"Error response: {json.dumps(error_data, indent=2)}")
+                    
+                    if 'errors' in error_data:
+                        for error in error_data['errors']:
+                            logger.error(f"API Error: {error.get('message')} (Code: {error.get('code')})")
+                except:
+                    logger.error(f"Response text: {e.response.text[:500]}")
+                
+                if status_code == 429:
+                    logger.warning("Rate limit exceeded. Waiting before retry...")
+                    time.sleep(60)  # Wait 1 minute on rate limit
+                elif status_code == 401:
+                    logger.error("Authentication failed. Check your Bearer Token.")
+                    logger.error("Verify your Bearer Token is correct and not expired.")
+                elif status_code == 403:
+                    logger.error("Access forbidden. You may need Academic Research access.")
+                    logger.error("Standard API access only allows 7 days of tweet history.")
+                    logger.error("Apply for Academic Research access at:")
+                    logger.error("https://developer.twitter.com/en/portal/petition/academic-research")
+                elif status_code == 400:
+                    logger.error("Bad request. Check your query parameters.")
+            raise
+
+    def _search_tweets(self, query: str, max_results: int = 100) -> List[Dict]:
         """
-        Search Twitter for a specific hashtag and extract tweets
+        Search tweets using Twitter API v2
         
         Args:
-            driver: Selenium WebDriver instance
-            hashtag: Hashtag to search for
+            query: Twitter search query
+            max_results: Maximum results per request (max 100)
             
         Returns:
             List of tweet dictionaries
         """
         tweets = []
-        try:
-            # Navigate to Twitter search
-            search_url = f"https://twitter.com/search?q={hashtag}&src=typed_query&f=live"
-            driver.get(search_url)
-            
-            # Wait for page to load
-            time.sleep(random.uniform(2, 4))
-            
-            # Scroll and collect tweets
-            last_height = driver.execute_script("return document.body.scrollHeight")
-            scroll_attempts = 0
-            max_scrolls = 50  # Limit scrolling to prevent infinite loops
-            
-            while len(tweets) < 500 and scroll_attempts < max_scrolls:
-                # Find tweet elements
-                try:
-                    tweet_elements = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
-                    
-                    for element in tweet_elements:
-                        try:
-                            tweet_data = self._extract_tweet_data(element, hashtag)
-                            if tweet_data and self._is_recent_tweet(tweet_data['timestamp']):
-                                tweets.append(tweet_data)
-                        except Exception as e:
-                            logger.warning(f"Error extracting tweet: {e}")
-                            continue
-                    
-                    # Remove duplicates based on content hash
-                    seen_hashes = set()
-                    unique_tweets = []
-                    for tweet in tweets:
-                        if tweet['content_hash'] not in seen_hashes:
-                            seen_hashes.add(tweet['content_hash'])
-                            unique_tweets.append(tweet)
-                    tweets = unique_tweets
-                    
-                except Exception as e:
-                    logger.warning(f"Error finding tweets: {e}")
-                
-                # Scroll down
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(random.uniform(1, 2))
-                
-                # Check if we've reached the end
-                new_height = driver.execute_script("return document.body.scrollHeight")
-                if new_height == last_height:
-                    scroll_attempts += 1
-                    if scroll_attempts > 3:
-                        break
+        next_token = None
+
+        while len(tweets) < max_results:
+            params = {
+                'query': query,
+                'max_results': min(100, max_results - len(tweets)),
+                'tweet.fields': 'created_at,public_metrics,author_id,lang,text',
+                'user.fields': 'username,name',
+                'expansions': 'author_id'
+            }
+
+            if next_token:
+                params['next_token'] = next_token
+
+            try:
+                response = self._make_api_request(self.SEARCH_ENDPOINT, params)
+
+                # Log full response for debugging
+                logger.debug(f"API Response for '{query}': {json.dumps(response, indent=2)}")
+
+                # Check for errors in response
+                if 'errors' in response:
+                    for error in response['errors']:
+                        logger.error(f"Twitter API error: {error.get('message', 'Unknown error')} (Code: {error.get('code', 'N/A')})")
+                        if error.get('code') == 25:  # Query too complex
+                            logger.warning("Query might be too complex. Try simplifying the search query.")
+                        elif error.get('code') == 32:  # Could not authenticate
+                            logger.error("Authentication failed. Check your Bearer Token.")
+                        elif error.get('code') == 88:  # Rate limit exceeded
+                            logger.warning("Rate limit exceeded. Will retry after waiting.")
+
+                # Check for warnings
+                if 'warnings' in response:
+                    for warning in response['warnings']:
+                        logger.warning(f"Twitter API warning: {warning}")
+
+                # Process tweets
+                if 'data' in response and response['data']:
+                    logger.info(f"API returned {len(response['data'])} tweets in response")
+                    for tweet in response['data']:
+                        tweet_data = self._process_tweet_data(tweet, response.get('includes', {}))
+                        if tweet_data:
+                            tweets.append(tweet_data)
+                elif 'data' not in response:
+                    logger.warning(f"No 'data' field in API response. Full response: {response}")
                 else:
-                    scroll_attempts = 0
-                    last_height = new_height
-                
-                # Rate limiting
-                time.sleep(random.uniform(0.5, 1.5))
-            
-        except Exception as e:
-            logger.error(f"Error searching for {hashtag}: {e}")
-        
-        return tweets
-    
-    def _extract_tweet_data(self, element, hashtag: str) -> Optional[Dict]:
-        """Extract data from a tweet element"""
+                    logger.info(f"API returned empty data array for query: {query}")
+
+                # Check result count in meta
+                meta = response.get('meta', {})
+                result_count = meta.get('result_count', 0)
+                logger.info(f"API meta shows result_count: {result_count}")
+
+                # Check for next page
+                if 'next_token' not in meta:
+                    logger.debug("No next_token found, reached end of results")
+                    break
+                next_token = meta['next_token']
+
+                # Avoid infinite loops
+                if len(tweets) >= max_results:
+                    break
+
+            except Exception as e:
+                logger.error(f"Error searching tweets for query '{query}': {e}", exc_info=True)
+                break
+
+        logger.info(f"Found {len(tweets)} tweets for query: {query}")
+        return tweets[:max_results]
+
+    def _process_tweet_data(self, tweet: Dict, includes: Dict) -> Optional[Dict]:
+        """Process raw tweet data from API into our format"""
         try:
-            # Extract username
-            try:
-                username_elem = element.find_element(By.CSS_SELECTOR, '[data-testid="User-Name"] a')
-                username = username_elem.get_attribute('href').split('/')[-1]
-            except:
-                username = "unknown"
-            
-            # Extract content
-            try:
-                content_elem = element.find_element(By.CSS_SELECTOR, '[data-testid="tweetText"]')
-                content = content_elem.text
-            except:
-                try:
-                    content_elem = element.find_element(By.CSS_SELECTOR, 'div[lang]')
-                    content = content_elem.text
-                except:
-                    content = ""
-            
-            if not content:
-                return None
-            
-            # Extract timestamp
-            try:
-                time_elem = element.find_element(By.CSS_SELECTOR, 'time')
-                timestamp_str = time_elem.get_attribute('datetime')
-                if timestamp_str:
-                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                else:
-                    timestamp = datetime.now()
-            except:
+            # Get user info
+            author_id = tweet.get('author_id')
+            users = includes.get('users', [])
+            user_info = next((u for u in users if u['id'] == author_id), {})
+
+            # Extract metrics
+            metrics = tweet.get('public_metrics', {})
+            likes = metrics.get('like_count', 0)
+            retweets = metrics.get('retweet_count', 0)
+            replies = metrics.get('reply_count', 0)
+
+            # Create content hash
+            content = tweet.get('text', '')
+            content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
+
+            # Extract hashtags and mentions
+            hashtags = re.findall(r'#(\w+)', content, re.IGNORECASE)
+            mentions = re.findall(r'@(\w+)', content)
+
+            # Convert timestamp
+            created_at = tweet.get('created_at')
+            if created_at:
+                timestamp = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+            else:
                 timestamp = datetime.now()
             
-            # Extract engagement metrics
-            likes = self._extract_metric(element, 'like')
-            retweets = self._extract_metric(element, 'retweet')
-            replies = self._extract_metric(element, 'reply')
-            
-            # Extract mentions and hashtags
-            mentions = re.findall(r'@(\w+)', content)
-            hashtags = re.findall(r'#(\w+)', content, re.IGNORECASE)
-            if hashtag.replace('#', '').lower() not in [h.lower() for h in hashtags]:
-                hashtags.append(hashtag.replace('#', ''))
-            
-            # Extract tweet ID from URL
-            try:
-                link_elem = element.find_element(By.CSS_SELECTOR, 'a[href*="/status/"]')
-                tweet_url = link_elem.get_attribute('href')
-                tweet_id = tweet_url.split('/status/')[-1].split('?')[0] if '/status/' in tweet_url else None
-            except:
-                tweet_url = None
-                tweet_id = None
-            
-            # Create content hash for deduplication
-            content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
-            
             return {
-                'username': username,
+                'username': user_info.get('username', 'unknown'),
                 'timestamp': timestamp,
                 'content': content,
                 'likes': likes,
@@ -205,60 +270,135 @@ class TwitterScraper:
                 'replies': replies,
                 'mentions': mentions,
                 'hashtags': hashtags,
-                'tweet_id': tweet_id,
-                'url': tweet_url,
+                'tweet_id': tweet.get('id'),
+                'url': f"https://twitter.com/i/web/status/{tweet.get('id')}",
                 'content_hash': content_hash,
             }
             
         except Exception as e:
-            logger.warning(f"Error extracting tweet data: {e}")
+            logger.warning(f"Error processing tweet data: {e}")
             return None
     
-    def _extract_metric(self, element, metric_type: str) -> int:
-        """Extract engagement metric (likes, retweets, replies)"""
-        try:
-            selectors = {
-                'like': '[data-testid="like"]',
-                'retweet': '[data-testid="retweet"]',
-                'reply': '[data-testid="reply"]',
-            }
+    def scrape_hashtag(self, hashtag: str) -> List[Dict]:
+        """Scrape tweets for a single hashtag using Twitter API"""
+        logger.info(f"Searching tweets for {hashtag} using Twitter API...")
+
+        # Build search query - try multiple query formats
+        queries = [
+            f"{hashtag} lang:en",  # English tweets only
+            f"{hashtag}",  # All languages
+            f'"{hashtag}"',  # Exact phrase match
+        ]
+
+        all_tweets = []
+        for query in queries:
+            logger.info(f"Trying query: {query}")
+            tweets = self._search_tweets(query, max_results=500)
             
-            metric_elem = element.find_element(By.CSS_SELECTOR, selectors.get(metric_type, ''))
-            metric_text = metric_elem.text.strip()
-            
-            # Parse numbers (handle K, M suffixes)
-            if 'K' in metric_text:
-                return int(float(metric_text.replace('K', '')) * 1000)
-            elif 'M' in metric_text:
-                return int(float(metric_text.replace('M', '')) * 1000000)
+            if tweets:
+                logger.info(f"Found {len(tweets)} tweets with query: {query}")
+                all_tweets.extend(tweets)
+                break  # Use first successful query
             else:
-                return int(metric_text) if metric_text.isdigit() else 0
-        except:
-            return 0
+                logger.debug(f"No tweets found with query: {query}")
+
+        # Filter for recent tweets
+        recent_tweets = []
+        for tweet in all_tweets:
+            if self._is_recent_tweet(tweet['timestamp']):
+                recent_tweets.append(tweet)
+            else:
+                logger.debug(f"Tweet filtered out (too old): {tweet['timestamp']}")
+
+        logger.info(f"Collected {len(recent_tweets)} recent tweets for {hashtag} (out of {len(all_tweets)} total)")
+        return recent_tweets
     
     def _is_recent_tweet(self, timestamp: datetime) -> bool:
-        """Check if tweet is within the last 24 hours"""
+        """Check if tweet is within the configured time window"""
         cutoff = datetime.now() - timedelta(hours=self.TIME_WINDOW_HOURS)
-        return timestamp >= cutoff
-    
-    def scrape_hashtag(self, hashtag: str) -> List[Dict]:
-        """Scrape tweets for a single hashtag"""
-        driver = None
+        is_recent = timestamp >= cutoff
+        if not is_recent:
+            logger.debug(f"Tweet from {timestamp} is older than {self.TIME_WINDOW_HOURS} hours (cutoff: {cutoff})")
+        return is_recent
+
+    def test_api_connection(self) -> Dict:
+        """
+        Test API connection and return diagnostic information
+        
+        Returns:
+            Dictionary with connection status and diagnostic info
+        """
+        diagnostics = {
+            'bearer_token_configured': bool(self.bearer_token),
+            'api_accessible': False,
+            'error': None,
+            'rate_limit_info': None,
+            'test_query_result': None
+        }
+
+        if not self.bearer_token:
+            diagnostics['error'] = "Bearer Token not configured"
+            return diagnostics
+
         try:
-            driver = self._create_driver()
-            tweets = self._search_twitter(driver, hashtag)
-            logger.info(f"Scraped {len(tweets)} tweets for {hashtag}")
-            return tweets
+            # Test with a simple query
+            test_query = "#nifty50"
+            params = {
+                'query': test_query,
+                'max_results': 10,
+                'tweet.fields': 'created_at,text',
+                'user.fields': 'username'
+            }
+
+            # Make direct request to capture headers
+            self._rate_limit_check()
+            url = f"{self.BASE_URL}{self.SEARCH_ENDPOINT}"
+            response = self.session.get(url, params=params)
+            
+            # Get rate limit info from headers
+            diagnostics['rate_limit_info'] = {
+                'remaining': response.headers.get('x-rate-limit-remaining'),
+                'reset': response.headers.get('x-rate-limit-reset')
+            }
+
+            response.raise_for_status()
+            response_data = response.json()
+            
+            diagnostics['api_accessible'] = True
+
+            # Check response
+            if 'data' in response_data:
+                diagnostics['test_query_result'] = {
+                    'tweets_found': len(response_data['data']),
+                    'sample_tweet': response_data['data'][0] if response_data['data'] else None
+                }
+            elif 'errors' in response_data:
+                diagnostics['error'] = response_data['errors']
+            else:
+                diagnostics['test_query_result'] = {
+                    'tweets_found': 0,
+                    'response_structure': list(response_data.keys()),
+                    'full_response': response_data
+                }
+
+        except requests.exceptions.RequestException as e:
+            diagnostics['error'] = str(e)
+            if hasattr(e, 'response') and e.response:
+                diagnostics['http_status'] = e.response.status_code
+                try:
+                    diagnostics['error_details'] = e.response.json()
+                except:
+                    diagnostics['error_details'] = e.response.text[:500]
+            diagnostics['api_accessible'] = False
         except Exception as e:
-            logger.error(f"Error scraping {hashtag}: {e}")
-            return []
-        finally:
-            if driver:
-                driver.quit()
+            diagnostics['error'] = str(e)
+            diagnostics['api_accessible'] = False
+
+        return diagnostics
     
     def scrape_all_hashtags(self) -> List[Dict]:
         """
-        Scrape all hashtags concurrently
+        Scrape all hashtags concurrently using Twitter API
         
         Returns:
             List of all unique tweets
@@ -285,4 +425,3 @@ class TwitterScraper:
         
         logger.info(f"Total unique tweets collected: {len(all_tweets)}")
         return all_tweets
-

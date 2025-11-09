@@ -6,13 +6,11 @@ Reference: https://github.com/mehranshakarami/AI_Spectrum/tree/main/2024/Twikit
 import asyncio
 import logging
 import re
-import os
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor
 import time
-
-from market_intel.settings import bearer_token
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +34,7 @@ class TwitterScraperTwikit:
     
     HASHTAGS = ['#nifty50', '#sensex', '#intraday', '#banknifty']
     MIN_TWEETS = 2000
-    TIME_WINDOW_HOURS = int(os.environ.get('TWITTER_TIME_WINDOW_HOURS', '240'))  # Can search further back with Twikit
+    TIME_WINDOW_HOURS = getattr(settings, 'TWITTER_TIME_WINDOW_HOURS', 240)  # Can search further back with Twikit
     
     def __init__(self, max_workers: int = 3, username: str = None, password: str = None):
         """
@@ -47,26 +45,16 @@ class TwitterScraperTwikit:
             username: Optional Twitter username for authentication (improves rate limits)
             password: Optional Twitter password for authentication
         """
-        if not TWIKIT_AVAILABLE:
+        if Client is None:
             raise ImportError(
-                "Twikit library not installed. Install it with: pip install twikit\n"
-                "Note: Twikit 2.0.0+ requires async/await syntax"
+                "Twikit library not installed. Install it with: pip install twikit"
             )
         
         self.max_workers = max_workers
         self.client = Client()
         self.authenticated = False
-        self.username = username or os.environ.get('TWITTER_USERNAME')
-        self.password = password or os.environ.get('TWITTER_PASSWORD')
-        
-        logger.info("Twikit scraper initialized (no API key required)")
-        
-        # Note: Authentication will be done lazily on first request
-        # This avoids blocking during initialization
-        if self.username and self.password:
-            logger.info("Credentials provided. Will authenticate on first request.")
-        else:
-            logger.info("No credentials provided. Using unauthenticated mode (may have stricter rate limits)")
+        self.username = username or getattr(settings, 'TWITTER_USERNAME', None)
+        self.password = password or getattr(settings, 'TWITTER_PASSWORD', None)
     
     async def _authenticate(self):
         """Authenticate with Twitter (optional but recommended)"""
@@ -85,9 +73,8 @@ class TwitterScraperTwikit:
         if not self.authenticated and self.username and self.password:
             try:
                 await self._authenticate()
-                logger.info("Successfully authenticated with Twitter")
             except Exception as e:
-                logger.warning(f"Authentication failed: {e}. Continuing without auth")
+                logger.warning(f"Authentication failed: {e}")
     
     async def _search_tweets_async(self, query: str, count: int = 100) -> List[Dict]:
         """
@@ -102,34 +89,22 @@ class TwitterScraperTwikit:
         """
         tweets = []
         try:
-            # Ensure authenticated if credentials available
             await self._ensure_authenticated()
-            
-            logger.info(f"Searching tweets for query: {query}")
-            
-            # Search tweets using Twikit
             search_results = await self.client.search_tweet(query, product='Latest', count=count)
             
             if not search_results:
-                logger.warning(f"No tweets found for query: {query}")
                 return tweets
             
-            logger.info(f"Found {len(search_results)} tweets for query: {query}")
-            
-            # Process each tweet
             for tweet in search_results:
                 try:
                     tweet_data = self._process_tweet_data(tweet)
                     if tweet_data and self._is_recent_tweet(tweet_data['timestamp']):
                         tweets.append(tweet_data)
                 except Exception as e:
-                    logger.debug(f"Error processing tweet: {e}")
                     continue
             
-            logger.info(f"Processed {len(tweets)} recent tweets for query: {query}")
-            
         except Exception as e:
-            logger.error(f"Error searching tweets for '{query}': {e}", exc_info=True)
+            logger.error(f"Error searching tweets: {e}")
         
         return tweets
     
@@ -182,10 +157,7 @@ class TwitterScraperTwikit:
     def _is_recent_tweet(self, timestamp: datetime) -> bool:
         """Check if tweet is within the configured time window"""
         cutoff = datetime.now() - timedelta(hours=self.TIME_WINDOW_HOURS)
-        is_recent = timestamp >= cutoff
-        if not is_recent:
-            logger.debug(f"Tweet from {timestamp} is older than {self.TIME_WINDOW_HOURS} hours (cutoff: {cutoff})")
-        return is_recent
+        return timestamp >= cutoff
     
     async def _scrape_hashtag_async(self, hashtag: str) -> List[Dict]:
         """Scrape tweets for a single hashtag asynchronously"""
@@ -201,16 +173,11 @@ class TwitterScraperTwikit:
             try:
                 tweets = await self._search_tweets_async(query, count=500)
                 if tweets:
-                    logger.info(f"Found {len(tweets)} tweets with query: {query}")
                     all_tweets.extend(tweets)
-                    break  # Use first successful query
-                else:
-                    logger.debug(f"No tweets found with query: {query}")
-            except Exception as e:
-                logger.debug(f"Query '{query}' failed: {e}")
+                    break
+            except Exception:
                 continue
         
-        # Deduplicate by content hash
         seen = set()
         unique_tweets = []
         for tweet in all_tweets:
@@ -219,18 +186,14 @@ class TwitterScraperTwikit:
                 seen.add(content_hash)
                 unique_tweets.append(tweet)
         
-        logger.info(f"Collected {len(unique_tweets)} unique recent tweets for {hashtag}")
+        logger.info(f"Collected {len(unique_tweets)} tweets for {hashtag}")
         return unique_tweets
     
     async def scrape_all_hashtags_async(self) -> List[Dict]:
         """Scrape all hashtags concurrently"""
-        logger.info(f"Starting to scrape {len(self.HASHTAGS)} hashtags using Twikit...")
-        
-        # Scrape all hashtags concurrently
         tasks = [self._scrape_hashtag_async(hashtag) for hashtag in self.HASHTAGS]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Combine all tweets
         all_tweets = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
@@ -238,7 +201,7 @@ class TwitterScraperTwikit:
             else:
                 all_tweets.extend(result)
         
-        logger.info(f"Total unique tweets collected: {len(all_tweets)}")
+        logger.info(f"Collected {len(all_tweets)} unique tweets")
         return all_tweets
     
     def scrape_hashtag(self, hashtag: str) -> List[Dict]:
@@ -263,12 +226,9 @@ def create_twitter_scraper(use_twikit: bool = None, **kwargs) -> object:
         TwitterScraper or TwitterScraperTwikit instance
     """
     if use_twikit:
-        logger.info("✅ Using Twikit scraper (no API key required)")
         return TwitterScraperTwikit(**kwargs)
     else:
-        if not bearer_token:
-            raise Exception("Bearer token not provided")
-        else:
-            logger.info("✅ Using Twitter API v2 scraper (Bearer Token configured)")
+        if TwitterScraper is None:
+            raise ImportError("TwitterScraper could not be imported")
         return TwitterScraper(**kwargs)
 

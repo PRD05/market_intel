@@ -62,8 +62,6 @@ class TweetAnalyzer:
             self.svd.fit(tfidf_matrix)
             
             self.is_fitted = True
-            logger.info(f"Fitted analyzer on {len(texts)} texts")
-            
         except Exception as e:
             logger.error(f"Error fitting analyzer: {e}")
             raise

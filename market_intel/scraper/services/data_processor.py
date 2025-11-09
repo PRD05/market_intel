@@ -124,7 +124,7 @@ class DataProcessor:
                 logger.warning(f"Error processing tweet: {e}")
                 continue
         
-        logger.info(f"Processed {len(processed)} unique tweets from {len(tweets)} raw tweets")
+        logger.info(f"Processed {len(processed)} tweets from {len(tweets)} raw")
         return processed
     
     def deduplicate(self, tweets: List[Dict]) -> List[Dict]:
@@ -178,7 +178,6 @@ class DataProcessor:
             Path to saved file
         """
         if not tweets:
-            logger.warning("No tweets to save")
             return ""
         
         if filename is None:

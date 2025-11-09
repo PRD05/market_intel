@@ -2,7 +2,7 @@
 Django management command to analyze tweets and generate signals
 """
 from django.core.management.base import BaseCommand
-from scraper.analyzer import TweetAnalyzer
+from scraper.services import TweetAnalyzer
 from scraper.models import Tweet, TweetSignal
 from django.utils import timezone
 from datetime import timedelta

@@ -6,16 +6,12 @@ import time
 import hashlib
 import logging
 import re
-import os
 import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +24,7 @@ class TwitterScraper:
     # Note: Standard API access allows 7 days (168 hours) max
     # Academic Research access allows full archive
     # Set to 168 for standard access, 240+ for Academic Research
-    TIME_WINDOW_HOURS = int(os.environ.get('TWITTER_TIME_WINDOW_HOURS', '168'))  # Default to 7 days for standard access
+    TIME_WINDOW_HOURS = getattr(settings, 'TWITTER_TIME_WINDOW_HOURS', 168)
 
     # Twitter API v2 configuration
     BASE_URL = "https://api.twitter.com/2"
@@ -42,7 +38,7 @@ class TwitterScraper:
             max_workers: Number of concurrent API requests (rate limited)
         """
         self.max_workers = max_workers
-        self.bearer_token = os.environ.get('TWITTER_BEARER_TOKEN')
+        self.bearer_token = getattr(settings, 'TWITTER_BEARER_TOKEN', None)
         self.session = requests.Session()
 
         # Set up session headers
@@ -51,19 +47,10 @@ class TwitterScraper:
                 'Authorization': f'Bearer {self.bearer_token}',
                 'Content-Type': 'application/json'
             })
-            logger.info("Twitter Bearer Token configured")
-            
-            # Warn about time window vs API access level
             if self.TIME_WINDOW_HOURS > 168:
-                logger.warning(f"TIME_WINDOW_HOURS is {self.TIME_WINDOW_HOURS} hours ({self.TIME_WINDOW_HOURS/24:.1f} days)")
-                logger.warning("Standard API access only allows 7 days (168 hours) of tweet history")
-                logger.warning("For longer time windows, you need Academic Research access")
-                logger.warning("Apply at: https://developer.twitter.com/en/portal/petition/academic-research")
-                logger.warning("Or set TWITTER_TIME_WINDOW_HOURS=168 for standard access")
+                logger.warning(f"Time window {self.TIME_WINDOW_HOURS}h exceeds standard API limit (168h)")
         else:
-            logger.error("TWITTER_BEARER_TOKEN environment variable not set")
-            logger.error("Get your Bearer Token from: https://developer.twitter.com/en/portal/dashboard")
-            logger.error("You'll need Academic Research access for full tweet search")
+            logger.error("TWITTER_BEARER_TOKEN not set")
 
         # Rate limiting: Twitter API v2 allows 300 requests per 15 minutes for recent search
         self.requests_per_window = 300
@@ -91,63 +78,31 @@ class TwitterScraper:
     def _make_api_request(self, endpoint: str, params: Dict = None) -> Dict:
         """Make a rate-limited API request to Twitter"""
         if not self.bearer_token:
-            logger.error("=" * 60)
-            logger.error("❌ Twitter Bearer Token not configured!")
-            logger.error("   This scraper requires TWITTER_BEARER_TOKEN environment variable")
-            logger.error("   Options:")
-            logger.error("   1. Set TWITTER_BEARER_TOKEN environment variable")
-            logger.error("   2. Use Twikit scraper instead: pip install twikit")
-            logger.error("      Then use: curl -X POST ... -d '{\"use_twikit\": true}'")
-            logger.error("=" * 60)
+            logger.error("Twitter Bearer Token not configured")
             raise ValueError("Twitter Bearer Token not configured")
 
         self._rate_limit_check()
 
         url = f"{self.BASE_URL}{endpoint}"
-        logger.debug(f"Making API request to: {url}")
 
         try:
             response = self.session.get(url, params=params)
             response.raise_for_status()
-
-            # Log rate limit info
-            remaining = response.headers.get('x-rate-limit-remaining')
-            reset_time = response.headers.get('x-rate-limit-reset')
-            if remaining:
-                logger.debug(f"Rate limit remaining: {remaining}")
-
             return response.json()
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"API request failed: {e}")
             if hasattr(e, 'response') and e.response:
                 status_code = e.response.status_code
-                logger.error(f"HTTP Status Code: {status_code}")
-                
-                # Try to get error details from response
-                try:
-                    error_data = e.response.json()
-                    logger.error(f"Error response: {json.dumps(error_data, indent=2)}")
-                    
-                    if 'errors' in error_data:
-                        for error in error_data['errors']:
-                            logger.error(f"API Error: {error.get('message')} (Code: {error.get('code')})")
-                except:
-                    logger.error(f"Response text: {e.response.text[:500]}")
-                
                 if status_code == 429:
-                    logger.warning("Rate limit exceeded. Waiting before retry...")
-                    time.sleep(60)  # Wait 1 minute on rate limit
+                    logger.warning("Rate limit exceeded")
+                    time.sleep(60)
                 elif status_code == 401:
-                    logger.error("Authentication failed. Check your Bearer Token.")
-                    logger.error("Verify your Bearer Token is correct and not expired.")
+                    logger.error("Authentication failed")
                 elif status_code == 403:
-                    logger.error("Access forbidden. You may need Academic Research access.")
-                    logger.error("Standard API access only allows 7 days of tweet history.")
-                    logger.error("Apply for Academic Research access at:")
-                    logger.error("https://developer.twitter.com/en/portal/petition/academic-research")
+                    logger.error("Access forbidden - may need Academic Research access")
                 elif status_code == 400:
-                    logger.error("Bad request. Check your query parameters.")
+                    logger.error("Bad request")
+            logger.error(f"API request failed: {e}")
             raise
 
     def _search_tweets(self, query: str, max_results: int = 100) -> List[Dict]:
@@ -179,45 +134,18 @@ class TwitterScraper:
             try:
                 response = self._make_api_request(self.SEARCH_ENDPOINT, params)
 
-                # Log full response for debugging
-                logger.debug(f"API Response for '{query}': {json.dumps(response, indent=2)}")
-
-                # Check for errors in response
                 if 'errors' in response:
                     for error in response['errors']:
-                        logger.error(f"Twitter API error: {error.get('message', 'Unknown error')} (Code: {error.get('code', 'N/A')})")
-                        if error.get('code') == 25:  # Query too complex
-                            logger.warning("Query might be too complex. Try simplifying the search query.")
-                        elif error.get('code') == 32:  # Could not authenticate
-                            logger.error("Authentication failed. Check your Bearer Token.")
-                        elif error.get('code') == 88:  # Rate limit exceeded
-                            logger.warning("Rate limit exceeded. Will retry after waiting.")
+                        logger.error(f"API error: {error.get('message')}")
 
-                # Check for warnings
-                if 'warnings' in response:
-                    for warning in response['warnings']:
-                        logger.warning(f"Twitter API warning: {warning}")
-
-                # Process tweets
                 if 'data' in response and response['data']:
-                    logger.info(f"API returned {len(response['data'])} tweets in response")
                     for tweet in response['data']:
                         tweet_data = self._process_tweet_data(tweet, response.get('includes', {}))
                         if tweet_data:
                             tweets.append(tweet_data)
-                elif 'data' not in response:
-                    logger.warning(f"No 'data' field in API response. Full response: {response}")
-                else:
-                    logger.info(f"API returned empty data array for query: {query}")
 
-                # Check result count in meta
                 meta = response.get('meta', {})
-                result_count = meta.get('result_count', 0)
-                logger.info(f"API meta shows result_count: {result_count}")
-
-                # Check for next page
                 if 'next_token' not in meta:
-                    logger.debug("No next_token found, reached end of results")
                     break
                 next_token = meta['next_token']
 
@@ -226,10 +154,9 @@ class TwitterScraper:
                     break
 
             except Exception as e:
-                logger.error(f"Error searching tweets for query '{query}': {e}", exc_info=True)
+                logger.error(f"Error searching tweets: {e}")
                 break
 
-        logger.info(f"Found {len(tweets)} tweets for query: {query}")
         return tweets[:max_results]
 
     def _process_tweet_data(self, tweet: Dict, includes: Dict) -> Optional[Dict]:
@@ -281,45 +208,27 @@ class TwitterScraper:
     
     def scrape_hashtag(self, hashtag: str) -> List[Dict]:
         """Scrape tweets for a single hashtag using Twitter API"""
-        logger.info(f"Searching tweets for {hashtag} using Twitter API...")
-
-        # Build search query - try multiple query formats
         queries = [
-            f"{hashtag} lang:en",  # English tweets only
-            f"{hashtag}",  # All languages
-            f'"{hashtag}"',  # Exact phrase match
+            f"{hashtag} lang:en",
+            f"{hashtag}",
+            f'"{hashtag}"',
         ]
 
         all_tweets = []
         for query in queries:
-            logger.info(f"Trying query: {query}")
             tweets = self._search_tweets(query, max_results=500)
-            
             if tweets:
-                logger.info(f"Found {len(tweets)} tweets with query: {query}")
                 all_tweets.extend(tweets)
-                break  # Use first successful query
-            else:
-                logger.debug(f"No tweets found with query: {query}")
+                break
 
-        # Filter for recent tweets
-        recent_tweets = []
-        for tweet in all_tweets:
-            if self._is_recent_tweet(tweet['timestamp']):
-                recent_tweets.append(tweet)
-            else:
-                logger.debug(f"Tweet filtered out (too old): {tweet['timestamp']}")
-
-        logger.info(f"Collected {len(recent_tweets)} recent tweets for {hashtag} (out of {len(all_tweets)} total)")
+        recent_tweets = [t for t in all_tweets if self._is_recent_tweet(t['timestamp'])]
+        logger.info(f"Collected {len(recent_tweets)} tweets for {hashtag}")
         return recent_tweets
     
     def _is_recent_tweet(self, timestamp: datetime) -> bool:
         """Check if tweet is within the configured time window"""
         cutoff = datetime.now() - timedelta(hours=self.TIME_WINDOW_HOURS)
-        is_recent = timestamp >= cutoff
-        if not is_recent:
-            logger.debug(f"Tweet from {timestamp} is older than {self.TIME_WINDOW_HOURS} hours (cutoff: {cutoff})")
-        return is_recent
+        return timestamp >= cutoff
 
     def test_api_connection(self) -> Dict:
         """
@@ -423,5 +332,5 @@ class TwitterScraper:
                 except Exception as e:
                     logger.error(f"Error processing {hashtag}: {e}")
         
-        logger.info(f"Total unique tweets collected: {len(all_tweets)}")
+        logger.info(f"Collected {len(all_tweets)} unique tweets")
         return all_tweets

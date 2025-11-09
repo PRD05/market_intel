@@ -14,6 +14,13 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 
+# Import colorlog for colored logging
+try:
+    import colorlog
+    COLORLOG_AVAILABLE = True
+except ImportError:
+    COLORLOG_AVAILABLE = False
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -136,38 +143,97 @@ if hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Logging configuration
-LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'verbose': {
-            'format': '{levelname} {asctime} {module} {message}',
-            'style': '{',
+if COLORLOG_AVAILABLE:
+    LOGGING = {
+        'version': 1,
+        'disable_existing_loggers': False,
+        'formatters': {
+            'verbose': {
+                'format': '{levelname} {asctime} {module} {message}',
+                'style': '{',
+            },
+            'colored': {
+                '()': 'colorlog.ColoredFormatter',
+                'format': '%(log_color)s%(levelname)-8s%(reset)s %(asctime)s [%(name)s] %(message)s',
+                'datefmt': '%Y-%m-%d %H:%M:%S',
+                'log_colors': {
+                    'DEBUG': 'cyan',
+                    'INFO': 'green',
+                    'WARNING': 'yellow',
+                    'ERROR': 'red',
+                    'CRITICAL': 'red,bg_white',
+                },
+            },
         },
-    },
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-            'formatter': 'verbose',
+        'handlers': {
+            'console': {
+                'class': 'logging.StreamHandler',
+                'formatter': 'colored',
+            },
+            'file': {
+                'class': 'logging.FileHandler',
+                'filename': 'scraper.log',
+                'formatter': 'verbose',
+            },
         },
-        'file': {
-            'class': 'logging.FileHandler',
-            'filename': 'scraper.log',
-            'formatter': 'verbose',
-        },
-    },
-    'root': {
-        'handlers': ['console', 'file'],
-        'level': 'INFO',
-    },
-    'loggers': {
-        'scraper': {
+        'root': {
             'handlers': ['console', 'file'],
             'level': 'INFO',
-            'propagate': False,
         },
-    },
-}
+        'loggers': {
+            'scraper': {
+                'handlers': ['console', 'file'],
+                'level': 'INFO',
+                'propagate': False,
+            },
+            # Reduce verbosity of httpx (used by twikit)
+            'httpx': {
+                'handlers': ['console', 'file'],
+                'level': 'WARNING',
+                'propagate': False,
+            },
+        },
+    }
+else:
+    # Fallback to standard logging if colorlog is not available
+    LOGGING = {
+        'version': 1,
+        'disable_existing_loggers': False,
+        'formatters': {
+            'verbose': {
+                'format': '{levelname} {asctime} {module} {message}',
+                'style': '{',
+            },
+        },
+        'handlers': {
+            'console': {
+                'class': 'logging.StreamHandler',
+                'formatter': 'verbose',
+            },
+            'file': {
+                'class': 'logging.FileHandler',
+                'filename': 'scraper.log',
+                'formatter': 'verbose',
+            },
+        },
+        'root': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+        },
+        'loggers': {
+            'scraper': {
+                'handlers': ['console', 'file'],
+                'level': 'INFO',
+                'propagate': False,
+            },
+            # Reduce verbosity of httpx (used by twikit)
+            'httpx': {
+                'handlers': ['console', 'file'],
+                'level': 'WARNING',
+                'propagate': False,
+            },
+        },
+    }
 
 # Swagger/OpenAPI settings
 SWAGGER_SETTINGS = {
@@ -197,4 +263,8 @@ REDOC_SETTINGS = {
     'LAZY_RENDERING': False,
 }
 
-bearer_token = os.environ.get('TWITTER_BEARER_TOKEN')
+# Twitter API Configuration
+TWITTER_BEARER_TOKEN = os.environ.get('TWITTER_BEARER_TOKEN', None)
+TWITTER_TIME_WINDOW_HOURS = int(os.environ.get('TWITTER_TIME_WINDOW_HOURS', '168'))  # Default 7 days for standard API
+TWITTER_USERNAME = os.environ.get('TWITTER_USERNAME', None)
+TWITTER_PASSWORD = os.environ.get('TWITTER_PASSWORD', None) 

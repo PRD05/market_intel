@@ -124,10 +124,7 @@ class MemoryEfficientVisualizer:
             plt.tight_layout()
             plt.savefig(filepath, dpi=150, bbox_inches='tight')
             plt.close()
-            
-            logger.info(f"Saved signal plot to {filepath}")
             return str(filepath)
-            
         except Exception as e:
             logger.error(f"Error creating signal plot: {e}")
             plt.close()
@@ -179,10 +176,7 @@ class MemoryEfficientVisualizer:
             plt.tight_layout()
             plt.savefig(filepath, dpi=150, bbox_inches='tight')
             plt.close()
-            
-            logger.info(f"Saved sentiment plot to {filepath}")
             return str(filepath)
-            
         except Exception as e:
             logger.error(f"Error creating sentiment plot: {e}")
             plt.close()
@@ -238,10 +232,7 @@ class MemoryEfficientVisualizer:
             plt.tight_layout()
             plt.savefig(filepath, dpi=150, bbox_inches='tight')
             plt.close()
-            
-            logger.info(f"Saved engagement plot to {filepath}")
             return str(filepath)
-            
         except Exception as e:
             logger.error(f"Error creating engagement plot: {e}")
             plt.close()
@@ -323,10 +314,7 @@ class MemoryEfficientVisualizer:
             plt.tight_layout()
             plt.savefig(filepath, dpi=150, bbox_inches='tight')
             plt.close()
-            
-            logger.info(f"Saved aggregation plot to {filepath}")
             return str(filepath)
-            
         except Exception as e:
             logger.error(f"Error creating aggregation plot: {e}")
             plt.close()

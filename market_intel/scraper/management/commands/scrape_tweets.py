@@ -2,8 +2,7 @@
 Django management command to scrape tweets from command line
 """
 from django.core.management.base import BaseCommand
-from scraper.twitter_scraper import TwitterScraper
-from scraper.data_processor import DataProcessor
+from scraper.services import TwitterScraper, DataProcessor
 from scraper.models import Tweet, ScrapingSession
 from django.utils import timezone
 import logging

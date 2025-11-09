@@ -87,6 +87,14 @@ class ScrapeTweetsAPIView(APIView):
             logger.info(f"Creating scraper with use_twikit={use_twikit}")
             scraper = create_twitter_scraper(use_twikit=use_twikit, max_workers=3)
             logger.info(f"Scraper created: {type(scraper).__name__}")
+            
+            # Validate scraper has required method
+            if not hasattr(scraper, 'scrape_all_hashtags'):
+                error_msg = f"Scraper {type(scraper).__name__} does not have scrape_all_hashtags method"
+                logger.error(error_msg)
+                logger.error(f"Available methods: {[m for m in dir(scraper) if not m.startswith('_')]}")
+                raise AttributeError(error_msg)
+            
             processor = DataProcessor(output_dir="data")
             
             # Scrape tweets

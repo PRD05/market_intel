@@ -14,6 +14,9 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
+
 # Import colorlog for colored logging
 try:
     import colorlog
@@ -268,3 +271,11 @@ TWITTER_BEARER_TOKEN = os.environ.get('TWITTER_BEARER_TOKEN', None)
 TWITTER_TIME_WINDOW_HOURS = int(os.environ.get('TWITTER_TIME_WINDOW_HOURS', '168'))  # Default 7 days for standard API
 TWITTER_USERNAME = os.environ.get('TWITTER_USERNAME', None)
 TWITTER_PASSWORD = os.environ.get('TWITTER_PASSWORD', None) 
+TWITTER_EMAIL = os.environ.get('TWITTER_EMAIL', None)
+TWITTER_DEBUG_MODE = os.environ.get('TWITTER_DEBUG_MODE', 'False').lower() in ('true', '1', 'yes')
+
+# Twikit Cookie Configuration (for cookie-based authentication)
+TWITTER_COOKIE_FILE = os.environ.get('TWITTER_COOKIE_FILE', None)  # Path to JSON file with cookies
+TWITTER_COOKIES = os.environ.get('TWITTER_COOKIES', None)  # JSON string with cookies
+TWITTER_CT0 = os.environ.get('TWITTER_CT0', None)  # CSRF token (ct0 cookie value)
+TWITTER_AUTH_TOKEN = os.environ.get('TWITTER_AUTH_TOKEN', None)  # Auth token cookie value

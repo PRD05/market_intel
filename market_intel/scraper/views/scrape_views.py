@@ -1,5 +1,4 @@
 import logging
-import threading
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -12,8 +11,9 @@ from ..serializers import (
     ErrorResponseSerializer,
 )
 from ..services import (
-    create_twitter_scraper,
     DataProcessor,
+    TwitterScraper,
+    TwitterScraperTwikit,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,15 +22,39 @@ logger = logging.getLogger(__name__)
 class ScrapeTweetsAPIView(APIView):
     """API endpoint to scrape tweets"""
 
+    @staticmethod
+    def create_twitter_scraper(use_twikit: bool = None, **kwargs) -> object:
+        """
+        Factory function to create appropriate Twitter scraper
+
+        Args:
+            use_twikit: If True, use Twikit. If False, use API. If None, auto-detect
+            **kwargs: Arguments to pass to scraper
+
+        Returns:
+            TwitterScraper or TwitterScraperTwikit instance
+        """
+        if use_twikit:
+            return TwitterScraperTwikit(**kwargs)
+        else:
+            if TwitterScraper is None:
+                raise ImportError("TwitterScraper could not be imported")
+            return TwitterScraper(**kwargs)
+
+
     def _scrape_and_process(self, session_id: int, use_twikit: bool = None):
-        """Background task to scrape and process tweets"""
+        """Scrape and process tweets synchronously"""
         session = None
         try:
             session = ScrapingSession.objects.get(id=session_id)
-            scraper = create_twitter_scraper(use_twikit=use_twikit, max_workers=3)
+            scraper = self.create_twitter_scraper(use_twikit=use_twikit)
             processor = DataProcessor(output_dir="data")
 
-            raw_tweets = scraper.scrape_all_hashtags()
+            # Use sync method for Twikit, async for API
+            if use_twikit or (use_twikit is None and hasattr(scraper, 'scrape_all_hashtags_sync')):
+                raw_tweets = scraper.scrape_all_hashtags_sync()
+            else:
+                raw_tweets = scraper.scrape_all_hashtags()
             if len(raw_tweets) < 2000:
                 logger.warning(f"Only collected {len(raw_tweets)} tweets")
 
@@ -71,6 +95,7 @@ class ScrapeTweetsAPIView(APIView):
             session.save()
 
             logger.info(f"Scraping completed: {saved_count} tweets saved")
+            return saved_count
 
         except Exception as e:
             logger.error(f"Error in scraping process: {e}")
@@ -79,20 +104,21 @@ class ScrapeTweetsAPIView(APIView):
                 session.errors = session.errors + [str(e)]
                 session.completed_at = timezone.now()
                 session.save()
-
+            raise
 
     @swagger_auto_schema(
-        operation_description="Start scraping tweets from Twitter/X. The scraping process runs in the background. "
-                              "Use the session_id to track progress. You can optionally specify which scraper to use.",
+        operation_description="Scrape tweets from Twitter/X. The scraping process runs synchronously. "
+                              "You can optionally specify which scraper to use.",
         request_body=ScrapeTweetsRequestSerializer,
         responses={
-            202: ScrapeTweetsResponseSerializer,
+            200: ScrapeTweetsResponseSerializer,
             500: ErrorResponseSerializer,
         },
         tags=['Scraping']
     )
     def post(self, request):
         """Start scraping process"""
+        session = None
         try:
             # Create scraping session
             session = ScrapingSession.objects.create(status='running')
@@ -100,24 +126,24 @@ class ScrapeTweetsAPIView(APIView):
             # Get scraper preference from request
             use_twikit = request.data.get('use_twikit', None) if hasattr(request, 'data') else None
             
-            # Start scraping in background thread
-            thread = threading.Thread(
-                target=self._scrape_and_process,
-                args=(session.id, use_twikit),
-                daemon=True
-            )
-            thread.start()
+            # Scrape synchronously
+            saved_count = self._scrape_and_process(session.id, use_twikit)
             
             scraper_type = "Twikit" if use_twikit else ("API" if use_twikit is False else "Auto-detect")
             return Response({
-                'status': 'started',
+                'status': 'completed',
                 'session_id': session.id,
-                'message': 'Scraping started in background',
+                'message': f'Scraping completed: {saved_count} tweets saved',
                 'scraper': scraper_type
-            }, status=status.HTTP_202_ACCEPTED)
+            }, status=status.HTTP_200_OK)
             
         except Exception as e:
-            logger.error(f"Error starting scrape: {e}")
+            logger.error(f"Error during scrape: {e}")
+            if session:
+                session.status = 'failed'
+                session.errors = session.errors + [str(e)]
+                session.completed_at = timezone.now()
+                session.save()
             return Response({
                 'error': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

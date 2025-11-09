@@ -9,7 +9,6 @@ import re
 import os
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from dotenv import load_dotenv
 
@@ -234,7 +233,7 @@ class TwitterScraper:
 
     def scrape_all_hashtags(self) -> List[Dict]:
         """
-        Scrape all hashtags concurrently using Twitter API
+        Scrape all hashtags sequentially using Twitter API
 
         Returns:
             List of all unique tweets
@@ -242,22 +241,16 @@ class TwitterScraper:
         all_tweets = []
         seen_hashes = set()
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_hashtag = {
-                executor.submit(self.scrape_hashtag, hashtag): hashtag
-                for hashtag in self.HASHTAGS
-            }
-
-            for future in as_completed(future_to_hashtag):
-                hashtag = future_to_hashtag[future]
-                try:
-                    tweets = future.result()
-                    for tweet in tweets:
-                        if tweet['content_hash'] not in seen_hashes:
-                            seen_hashes.add(tweet['content_hash'])
-                            all_tweets.append(tweet)
-                except Exception as e:
-                    logger.error(f"Error processing {hashtag}: {e}")
+        # Process hashtags sequentially
+        for hashtag in self.HASHTAGS:
+            try:
+                tweets = self.scrape_hashtag(hashtag)
+                for tweet in tweets:
+                    if tweet['content_hash'] not in seen_hashes:
+                        seen_hashes.add(tweet['content_hash'])
+                        all_tweets.append(tweet)
+            except Exception as e:
+                logger.error(f"Error processing {hashtag}: {e}")
 
         logger.info(f"Total unique tweets collected: {len(all_tweets)}")
         return all_tweets

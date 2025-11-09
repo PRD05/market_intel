@@ -11,6 +11,7 @@ scipy==1.14.1
 matplotlib==3.9.2
 seaborn==0.13.2
 webdriver-manager==4.0.2
+undetected-chromedriver>=3.5.0
 psycopg2-binary==2.9.9
 python-dotenv==1.0.0
 twikit>=2.0.0
